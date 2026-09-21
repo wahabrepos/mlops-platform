@@ -1,0 +1,11 @@
+# ---------------------------------------------------------------
+# Local-only files (privacy): never push these to the remote repo
+# ---------------------------------------------------------------
+
+# How Claude Code should work in this repo
+CLAUDE.md
+CLAUDE.local.md
+.claude/
+
+# Build plan, CV section, budget ledger, demo scripts
+docs/
