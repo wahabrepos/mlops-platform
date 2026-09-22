@@ -25,7 +25,6 @@ coverage.out
 *.tfstate
 *.tfstate.*
 .terraform/
-.terraform.lock.hcl
 mlruns/
 .venv/
 kubeconfig
@@ -33,3 +32,9 @@ kubeconfig
 *.pem
 *.key
 platform/local/volumes/
+
+# ---------------------------------------------------------------
+# Python bytecode
+# ---------------------------------------------------------------
+__pycache__/
+*.py[cod]

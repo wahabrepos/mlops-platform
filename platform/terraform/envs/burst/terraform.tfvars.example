@@ -1,0 +1,6 @@
+# Copy to terraform.tfvars and fill in. *.tfvars is gitignored.
+subscription_id = "00000000-0000-0000-0000-000000000000"
+
+# Drop to 1 to halve the node cost. KServe still works; you lose the ability to
+# show champion and contender pods landing on different nodes.
+node_count = 2

@@ -1,0 +1,13 @@
+# Copy to terraform.tfvars and fill in. *.tfvars is gitignored.
+#   cp terraform.tfvars.example terraform.tfvars
+
+subscription_id = "00000000-0000-0000-0000-000000000000"
+alert_email     = "vahapmoh@gmail.com"
+
+# Both must be globally unique across all of Azure. Add a suffix if apply
+# fails with "already in use" — that error appears at apply time, not plan time.
+acr_name             = "wahabmlopsacr"
+storage_account_name = "wahabmlopsdata"
+
+# Set below your remaining credit so the alarm fires while you can still act.
+monthly_budget = 30
