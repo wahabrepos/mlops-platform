@@ -202,7 +202,12 @@ services:
     volumes:
       - ../../pipelines/airflow/dags:/opt/airflow/dags:ro
       - ../../pipelines/quality:/opt/airflow/quality:ro
-      - ./volumes/airflow-logs:/opt/airflow/logs
+      # A named volume, not a bind mount. Docker seeds a fresh named volume
+      # from the image, so it inherits /opt/airflow/logs owned by uid 50000 —
+      # the user the airflow image runs as. A bind mount to a host directory is
+      # created root-owned instead, and airflow then cannot create
+      # logs/scheduler, which kills the container at startup.
+      - airflow-logs:/opt/airflow/logs
     extra_hosts:
       - "host.docker.internal:host-gateway"
     command: standalone
@@ -270,3 +275,6 @@ services:
       - ./volumes/grafana:/var/lib/grafana
     ports:
       - "3001:3000"   # GUI: http://localhost:3001
+
+volumes:
+  airflow-logs:
