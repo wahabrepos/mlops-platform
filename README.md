@@ -4,7 +4,26 @@ An MLOps / AI platform built as six connected projects in one monorepo: data pla
 
 ---
 
+## Status
+
+**Scaffolding — P1 (dataset-api) in progress.** This is an active build, not a
+finished platform. The layout below is the *target*; what exists today:
+
+| Component | State |
+|---|---|
+| `Makefile` — repo entry point | working |
+| `services/dataset-api` — health endpoint, Go module | in progress |
+| everything else in the tree below | **not built yet** |
+
+Nothing here is claimed to run until its section says so. Where something was
+written but not executed against real infrastructure, it says "validated, not
+deployed".
+
+---
+
 ## Repository layout
+
+The target layout. Directories appear as their project is built.
 
 ```
 mlops-platform/
