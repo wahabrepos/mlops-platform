@@ -9,3 +9,27 @@ CLAUDE.local.md
 
 # Build plan, CV section, budget ledger, demo scripts
 docs/
+
+# ---------------------------------------------------------------
+# Build artifacts
+# ---------------------------------------------------------------
+bin/
+coverage.out
+
+# ---------------------------------------------------------------
+# Never commit — CLAUDE.md section 7
+# ---------------------------------------------------------------
+.env
+*.env
+!*.env.example
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+mlruns/
+.venv/
+kubeconfig
+*.kubeconfig
+*.pem
+*.key
+platform/local/volumes/
