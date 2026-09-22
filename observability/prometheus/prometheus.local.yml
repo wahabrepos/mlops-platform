@@ -1,0 +1,35 @@
+# Prometheus for the local stack.
+#
+# The mental model: Prometheus is a puller. Nothing sends it metrics; it
+# fetches /metrics from every target on a timer. That inversion is why a
+# service only has to expose a text endpoint to be monitored, and why a
+# service behind NAT that Prometheus cannot reach is invisible no matter how
+# good its instrumentation.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    cluster: local
+    platform: mlops-platform
+
+rule_files:
+  - /etc/prometheus/alerts/*.yml
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # The Go dataset API, running on the host rather than in compose.
+  # host.docker.internal resolves to the host from inside the container; the
+  # extra_hosts entry in docker-compose.yml is what makes it work on Linux,
+  # where Docker does not provide it by default.
+  - job_name: dataset-api
+    static_configs:
+      - targets: ["host.docker.internal:8080"]
+    metrics_path: /metrics
+
+  - job_name: drift-collector
+    static_configs:
+      - targets: ["host.docker.internal:8090"]
+    metrics_path: /metrics

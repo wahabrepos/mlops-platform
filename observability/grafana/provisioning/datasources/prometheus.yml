@@ -1,0 +1,10 @@
+# Provisioning: Grafana reads this at startup and creates the datasource.
+# Clicking it in the UI would work once; a file in git works on every machine
+# and survives a container rebuild. Same reasoning as Terraform, smaller scale.
+apiVersion: 1
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true

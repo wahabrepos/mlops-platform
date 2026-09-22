@@ -1,0 +1,47 @@
+# Prometheus inside Kubernetes: the same idea, but targets are discovered
+# rather than listed.
+#
+# kubernetes_sd_configs asks the API server for the current pods and turns each
+# into a target. The relabel_configs below are the filter: keep only pods
+# carrying prometheus.io/scrape=true, and read the port and path from their
+# other annotations. That is why platform/k8s/dataset-api/deployment.yaml has
+# those three annotations — this file is what reads them.
+#
+# Relabelling is the part everyone finds confusing. Read it as: "for each
+# discovered target, look at this metadata field, and either drop the target or
+# rewrite one of its labels."
+global:
+  scrape_interval: 15s
+  external_labels:
+    cluster: aks-burst
+
+scrape_configs:
+  - job_name: kubernetes-pods
+    kubernetes_sd_configs:
+      - role: pod
+
+    relabel_configs:
+      # 1. Drop every pod that has not opted in.
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+        action: keep
+        regex: "true"
+
+      # 2. Let a pod override the metrics path.
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+        action: replace
+        target_label: __metrics_path__
+        regex: (.+)
+
+      # 3. Rewrite the address to use the annotated port.
+      - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+        action: replace
+        regex: ([^:]+)(?::\d+)?;(\d+)
+        replacement: $1:$2
+        target_label: __address__
+
+      # 4. Carry namespace and pod name through as labels, so a query can
+      #    group by them. Without this every series looks identical.
+      - source_labels: [__meta_kubernetes_namespace]
+        target_label: namespace
+      - source_labels: [__meta_kubernetes_pod_name]
+        target_label: pod

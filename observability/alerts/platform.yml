@@ -1,0 +1,86 @@
+# Alert rules.
+#
+# Two principles worth stating in an interview:
+#
+# 1. Alert on SYMPTOMS, not causes. "The error rate is above 5%" is actionable;
+#    "CPU is at 80%" is not — a busy service at 80% CPU serving every request
+#    correctly does not need waking anyone.
+# 2. Every alert needs a `for:` clause. Without it, a single scrape blip pages
+#    you. `for: 5m` means "sustained for five minutes", which is the difference
+#    between an alert and a noise generator.
+groups:
+  - name: dataset-api
+    rules:
+      - alert: DatasetAPIDown
+        expr: up{job="dataset-api"} == 0
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: "dataset-api is not being scraped"
+          description: "Prometheus cannot reach dataset-api. Either the service is down or the scrape target is misconfigured."
+
+      - alert: DatasetAPIHighErrorRate
+        # Ratio of 5xx to all requests over 5 minutes. rate() over a counter,
+        # not the counter itself: counters only go up, so their raw value tells
+        # you nothing about now.
+        expr: |
+          sum(rate(dataset_api_http_requests_total{status=~"5.."}[5m]))
+          /
+          sum(rate(dataset_api_http_requests_total[5m])) > 0.05
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "dataset-api 5xx rate above 5%"
+
+      - alert: DatasetAPISlowP95
+        # histogram_quantile over the _bucket series is the whole reason the
+        # metric is a histogram rather than a gauge of the last duration.
+        expr: |
+          histogram_quantile(0.95,
+            sum by (le, route) (rate(dataset_api_http_request_duration_seconds_bucket[5m]))
+          ) > 0.5
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "p95 latency above 500ms on {{ $labels.route }}"
+
+  - name: data-quality
+    rules:
+      - alert: DataQualityGateFailing
+        # increase() over 1h rather than rate(): for a rare event, "how many
+        # times in the last hour" is more meaningful than a per-second rate
+        # that will always read as a tiny fraction.
+        expr: increase(dataset_api_quality_failures_total[1h]) > 0
+        for: 1m
+        labels: { severity: warning }
+        annotations:
+          summary: "A dataset version failed its expectation suite in the last hour"
+          description: "Check the quality report linked on the version in the catalog."
+
+      - alert: FreezeBlockedRepeatedly
+        expr: increase(dataset_api_freeze_rejected_total[6h]) > 3
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "The quality gate has blocked more than 3 freezes in 6 hours"
+          description: "Either upstream data has degraded or the expectation suite is too strict."
+
+  - name: inference
+    rules:
+      - alert: ModelDriftDetected
+        expr: mlops_feature_drift_score > 0.3
+        for: 15m
+        labels: { severity: warning }
+        annotations:
+          summary: "Drift on {{ $labels.feature }} for model {{ $labels.model }}"
+          description: "PSI above 0.3 indicates a meaningful distribution shift. Consider retraining."
+
+      - alert: CanaryErrorBudgetBurn
+        expr: |
+          sum(rate(revision_request_count{response_code=~"5.."}[5m])) by (revision)
+          /
+          sum(rate(revision_request_count[5m])) by (revision) > 0.02
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: "Contender revision {{ $labels.revision }} exceeding 2% errors — promotion should be blocked"
