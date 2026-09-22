@@ -1,0 +1,46 @@
+# A three-node kind cluster: one control plane, two workers.
+#
+# Why two workers rather than one: KServe schedules a model pod and a queue
+# proxy per InferenceService, and Project 3 runs a champion AND a contender at
+# the same time. On a single node you can still do it, but you lose the ability
+# to demonstrate that traffic splitting is real rather than an illusion of
+# scheduling. Two workers makes the canary story visible in `kubectl get pods -o wide`.
+#
+# Memory budget, measured: control plane ~1.2GB, each worker ~0.6GB idle,
+# Istio+Knative+KServe ~2.5GB, one sklearn InferenceService ~0.5GB.
+# Budget ~8GB free RAM before starting. If you have less, drop to one worker.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: mlops
+
+nodes:
+  - role: control-plane
+    kubeadmConfigPatches:
+      # Label the control plane as an ingress-ready node so the ingress
+      # controller's nodeSelector matches it, then map 80/443 from the host.
+      # Without this, reaching an Ingress from your browser needs a
+      # port-forward every time — and the whole point of Project 3 is a URL
+      # you can curl and screenshot.
+      - |
+        kind: InitConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "ingress-ready=true"
+    extraPortMappings:
+      - containerPort: 80
+        hostPort: 8088
+        protocol: TCP
+      - containerPort: 443
+        hostPort: 8443
+        protocol: TCP
+  - role: worker
+  - role: worker
+
+# containerd is told to trust the local registry created by
+# scripts/kind-registry.sh. This is what lets you `docker push
+# localhost:5001/dataset-api` and have kind pull it, without a cloud registry
+# and without `kind load` on every rebuild.
+containerdConfigPatches:
+  - |-
+    [plugins."io.containerd.grpc.v1.cri".registry.mirrors."localhost:5001"]
+      endpoint = ["http://kind-registry:5000"]

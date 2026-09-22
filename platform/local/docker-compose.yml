@@ -1,0 +1,272 @@
+# The zero-cost half of the platform.
+#
+# Every service here is something you would pay Azure for in production:
+#   MinIO      stands in for Azure Data Lake Storage Gen2 (both speak S3)
+#   Postgres   stands in for Azure Database for PostgreSQL
+#   MLflow     is the same MLflow you would run on AKS, just not on AKS
+#
+# Running them locally is not a compromise you apologise for in an interview.
+# It is the standard way to develop against cloud services without paying for
+# an idle cluster. The Terraform in platform/terraform/ provisions the real
+# Azure equivalents, and services read their endpoints from environment
+# variables — so the same binary runs against either.
+#
+# PROFILES
+# --------
+# Nothing starts unless you name its profile. This matters on a
+# memory-constrained machine: you almost never need all of it at once.
+#
+#   make local-up                 -> core     (postgres, minio, mlflow)
+#   make local-up PROFILE=airflow -> + airflow
+#   make local-up PROFILE=obs     -> + prometheus, grafana
+#   make local-up PROFILE=lineage -> + marquez  (amd64 only, see note below)
+#
+# ARCHITECTURE NOTE (read this if an image fails to pull)
+# ------------------------------------------------------
+# Your workstation is arm64. Every image pinned below publishes an arm64
+# variant EXCEPT marquez, which is amd64-only at time of writing. That is why
+# lineage is its own profile: on arm64 you either run it under emulation
+# (slow but works: `docker run --platform linux/amd64`) or you use the
+# OpenLineage events we already write to Postgres and skip the Marquez UI.
+# Project 1's lineage is emitted either way — Marquez is only the viewer.
+
+name: mlops-platform-local
+
+services:
+  # --------------------------------------------------------------------------
+  # Postgres: metadata store for both the dataset API and MLflow.
+  #
+  # Two logical databases inside one server. In Azure these would be two
+  # databases on one Flexible Server instance — same shape, so the connection
+  # strings translate directly.
+  # --------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    profiles: [core, airflow, obs, lineage]
+    environment:
+      POSTGRES_USER: mlops
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mlops_dev_only}
+      POSTGRES_DB: datasets
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./volumes/postgres:/var/lib/postgresql/data
+      - ./init-databases.sql:/docker-entrypoint-initdb.d/10-init.sql:ro
+    healthcheck:
+      # Other services wait on this. Without it, MLflow races Postgres on
+      # startup and dies with "connection refused" roughly half the time.
+      test: ["CMD-SHELL", "pg_isready -U mlops -d datasets"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # --------------------------------------------------------------------------
+  # MinIO: S3-compatible object storage, standing in for ADLS Gen2.
+  #
+  # Why this substitution is honest: ADLS Gen2 exposes an S3-compatible surface
+  # and, more importantly, every tool we use (DVC, MLflow, Delta, boto3) talks
+  # to it through the S3 API with an endpoint override. Swapping MinIO for ADLS
+  # is a change of three environment variables, not a rewrite.
+  # --------------------------------------------------------------------------
+  minio:
+    image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
+    profiles: [core, airflow, obs, lineage]
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    ports:
+      - "9000:9000"   # S3 API
+      - "9001:9001"   # web console  <- GUI: http://localhost:9001
+    volumes:
+      - ./volumes/minio:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # --------------------------------------------------------------------------
+  # One-shot job: create the buckets the platform expects, then exit.
+  #
+  # This is the local equivalent of the `azurerm_storage_container` resources
+  # in platform/terraform/modules/storage. Keeping bucket creation in code
+  # rather than clicking it in the console is the same discipline as Terraform:
+  # a fresh machine reaches the same state with one command.
+  # --------------------------------------------------------------------------
+  minio-init:
+    image: quay.io/minio/mc:RELEASE.2025-04-16T18-13-26Z
+    profiles: [core, airflow, obs, lineage]
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 $${MINIO_ROOT_USER} $${MINIO_ROOT_PASSWORD} &&
+      mc mb --ignore-existing local/raw &&
+      mc mb --ignore-existing local/curated &&
+      mc mb --ignore-existing local/annotations &&
+      mc mb --ignore-existing local/mlflow &&
+      mc mb --ignore-existing local/dvc &&
+      mc ls local &&
+      echo 'buckets ready'
+      "
+
+  # --------------------------------------------------------------------------
+  # MLflow tracking server + model registry.
+  #
+  # Built from platform/local/mlflow.Dockerfile rather than pulled, for one
+  # reason: we need psycopg2 and boto3 in the image, and building it ourselves
+  # guarantees an arm64 image on your machine. It is a 6-line Dockerfile.
+  #
+  # --backend-store-uri  -> where runs, params and metrics go (Postgres)
+  # --artifacts-destination -> where models and files go (MinIO/S3)
+  # Splitting those two is what lets the registry stay small and queryable
+  # while artifacts live in cheap object storage.
+  # --------------------------------------------------------------------------
+  mlflow:
+    build:
+      context: .
+      dockerfile: mlflow.Dockerfile
+    image: mlops-platform/mlflow:local
+    profiles: [core, airflow, obs, lineage]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    environment:
+      MLFLOW_S3_ENDPOINT_URL: http://minio:9000
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minioadmin}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    command: >
+      mlflow server
+      --host 0.0.0.0
+      --port 5000
+      --backend-store-uri postgresql://mlops:${POSTGRES_PASSWORD:-mlops_dev_only}@postgres:5432/mlflow
+      --artifacts-destination s3://mlflow
+      --serve-artifacts
+    ports:
+      - "5000:5000"   # GUI: http://localhost:5000
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:5000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  # --------------------------------------------------------------------------
+  # Airflow, single-container "standalone" mode.
+  #
+  # The official Airflow compose file runs six containers (webserver,
+  # scheduler, worker, triggerer, redis, postgres). That is the right shape for
+  # production and the wrong shape for a laptop. `airflow standalone` runs the
+  # scheduler and webserver in one process against the Postgres above.
+  #
+  # What you lose: parallel workers, and the Celery/Kubernetes executor story.
+  # You should know that and say it — see docs/demo-scripts/p1-demo.md.
+  # --------------------------------------------------------------------------
+  airflow:
+    image: apache/airflow:2.10.5-python3.11
+    profiles: [airflow]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://mlops:${POSTGRES_PASSWORD:-mlops_dev_only}@postgres:5432/airflow
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+      # OpenLineage: Airflow emits a lineage event per task automatically once
+      # this transport is configured. This is the single highest-value line in
+      # the whole compose file for Project 1 — lineage for free, no DAG changes.
+      AIRFLOW__OPENLINEAGE__TRANSPORT: '{"type": "http", "url": "http://marquez:5000"}'
+      AIRFLOW__OPENLINEAGE__NAMESPACE: mlops-platform
+      AIRFLOW__OPENLINEAGE__DISABLED: "${OPENLINEAGE_DISABLED:-true}"
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      MLFLOW_S3_ENDPOINT_URL: http://minio:9000
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minioadmin}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      DATASET_API_URL: http://host.docker.internal:8080
+      _PIP_ADDITIONAL_REQUIREMENTS: >-
+        great-expectations==0.18.19
+        minio==7.2.15
+        openlineage-airflow==1.19.0
+        pandas==2.2.3
+    ports:
+      - "8081:8080"   # GUI: http://localhost:8081  (8080 is the dataset API)
+    volumes:
+      - ../../pipelines/airflow/dags:/opt/airflow/dags:ro
+      - ../../pipelines/quality:/opt/airflow/quality:ro
+      - ./volumes/airflow-logs:/opt/airflow/logs
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command: standalone
+
+  # --------------------------------------------------------------------------
+  # Marquez: the OpenLineage reference server + UI.
+  # amd64-only image. On arm64 this will fail to pull unless you force
+  # emulation. That is expected and documented — see the note at the top.
+  # --------------------------------------------------------------------------
+  marquez:
+    image: marquezproject/marquez:0.50.0
+    profiles: [lineage]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      MARQUEZ_PORT: 5000
+      MARQUEZ_ADMIN_PORT: 5001
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: marquez
+      POSTGRES_USER: mlops
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mlops_dev_only}
+    ports:
+      - "5002:5000"
+      - "5003:5001"
+
+  marquez-web:
+    image: marquezproject/marquez-web:0.50.0
+    profiles: [lineage]
+    depends_on: [marquez]
+    environment:
+      MARQUEZ_HOST: marquez
+      MARQUEZ_PORT: 5000
+    ports:
+      - "3000:3000"   # GUI: http://localhost:3000
+
+  # --------------------------------------------------------------------------
+  # Prometheus + Grafana. Used from Project 3 onward, and the whole point of
+  # Project 5. Scrape config lives in observability/prometheus/.
+  # --------------------------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:v3.3.0
+    profiles: [obs]
+    volumes:
+      - ../../observability/prometheus/prometheus.local.yml:/etc/prometheus/prometheus.yml:ro
+      - ../../observability/alerts:/etc/prometheus/alerts:ro
+      - ./volumes/prometheus:/prometheus
+    ports:
+      - "9090:9090"   # GUI: http://localhost:9090
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  grafana:
+    image: grafana/grafana:11.6.1
+    profiles: [obs]
+    depends_on: [prometheus]
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ../../observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../../observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - ./volumes/grafana:/var/lib/grafana
+    ports:
+      - "3001:3000"   # GUI: http://localhost:3001
