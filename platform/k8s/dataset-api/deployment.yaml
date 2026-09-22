@@ -1,0 +1,80 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dataset-api
+  labels:
+    app.kubernetes.io/name: dataset-api
+    app.kubernetes.io/part-of: mlops-platform
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: dataset-api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: dataset-api
+      annotations:
+        # Tells the Prometheus scrape config in observability/ to pick this pod
+        # up. Annotation-based discovery means a new service is scraped without
+        # editing Prometheus' config — that is the whole point of service
+        # discovery, and worth being able to explain.
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        fsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: api
+          image: localhost:5001/dataset-api:dev
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: LOG_LEVEL
+              value: info
+            # Kubernetes' downward API: the pod injects facts about itself.
+            # Useful in logs when you have 20 replicas and one is misbehaving.
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+
+          # Liveness asks "is the process wedged?" — restart if it fails.
+          # It hits /healthz, which does NOT touch the backend, so a database
+          # outage never causes a restart loop.
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 3
+            periodSeconds: 10
+            failureThreshold: 3
+
+          # Readiness asks "can this pod serve?" — remove from the Service's
+          # endpoints if it fails, but do NOT restart. It hits /readyz, which
+          # DOES check the backend. This split is the single most important
+          # probe concept in Kubernetes.
+          readinessProbe:
+            httpGet: { path: /readyz, port: http }
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            failureThreshold: 2
+
+          # Requests are what the scheduler uses to place the pod; limits are
+          # what the kernel enforces. Memory over the limit is an OOMKill;
+          # CPU over the limit is throttling, not a kill. Knowing the
+          # difference is a common interview question.
+          resources:
+            requests: { cpu: 25m, memory: 32Mi }
+            limits:   { cpu: 500m, memory: 128Mi }
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
