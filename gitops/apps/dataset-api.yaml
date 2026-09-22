@@ -1,0 +1,46 @@
+# An Argo CD Application: "keep this cluster path matching this git path".
+#
+# THE GITOPS INVERSION, which is the whole idea:
+# CI does not deploy. CI builds an image, pushes it, and commits a new tag into
+# this repository. Argo CD, running inside the cluster, notices the commit and
+# reconciles. Nothing outside the cluster ever holds cluster credentials.
+#
+# Two consequences worth stating: a leaked CI token cannot touch production,
+# and `git revert` is a rollback — because the git history IS the deployment
+# history.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: dataset-api
+  namespace: argocd
+  finalizers:
+    # Without this, deleting the Application leaves its resources orphaned in
+    # the cluster. With it, deletion cascades.
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+
+  source:
+    repoURL: https://github.com/wahabrepos/mlops-platform.git
+    targetRevision: main
+    path: gitops/envs/dev
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: models
+
+  syncPolicy:
+    automated:
+      # prune: delete cluster resources whose manifests were removed from git.
+      # Without it, git is only additive and deleted services linger forever.
+      prune: true
+      # selfHeal: revert manual kubectl changes back to what git says. This is
+      # the line that makes "the cluster matches git" true rather than aspirational.
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+    retry:
+      limit: 3
+      backoff:
+        duration: 10s
+        factor: 2

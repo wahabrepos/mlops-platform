@@ -1,0 +1,27 @@
+# Kustomize: patch a base rather than copy it.
+#
+# dev and prod share every manifest in platform/k8s/ and differ only in the
+# overrides below. Copying the YAML per environment is how the two silently
+# drift apart; patching means a change to the base reaches both.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: models
+
+resources:
+  - ../../../platform/k8s/dataset-api
+
+# THIS is the line CI rewrites on every build. The commit that changes it is
+# the deployment. `git log gitops/envs/dev/kustomization.yaml` is a complete,
+# auditable history of what ran in dev and when.
+images:
+  - name: localhost:5001/dataset-api
+    newName: wahabmlopsacr.azurecr.io/dataset-api
+    newTag: dev-0000000
+
+replicas:
+  - name: dataset-api
+    count: 1
+
+commonLabels:
+  environment: dev

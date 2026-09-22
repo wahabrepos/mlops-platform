@@ -1,0 +1,22 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: models-prod
+
+resources:
+  - ../../../platform/k8s/dataset-api
+
+images:
+  - name: localhost:5001/dataset-api
+    newName: wahabmlopsacr.azurecr.io/dataset-api
+    # Prod is promoted deliberately, by a human editing this line (or by a
+    # release workflow with an approval gate) — never automatically from dev.
+    # The tag lagging dev is the normal, correct state.
+    newTag: v0.1.0
+
+replicas:
+  - name: dataset-api
+    count: 2
+
+commonLabels:
+  environment: prod
