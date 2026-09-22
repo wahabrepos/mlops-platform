@@ -1,63 +1,73 @@
 // Command api serves the dataset catalog HTTP API.
-//
-// Right now it serves only /healthz. That is deliberate: it makes the build,
-// the test target and the container image real before any domain logic exists,
-// so every later change lands on something that already works.
 package main
 
 import (
-	"encoding/json"
+	"context"
+	"errors"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
+
+	"github.com/wahabrepos/mlops-platform/services/dataset-api/internal/httpapi"
+	"github.com/wahabrepos/mlops-platform/services/dataset-api/internal/store"
 )
 
 // version is injected at build time by the Makefile:
 //
 //	go build -ldflags="-X main.version=$(GIT_SHA)"
-//
-// It defaults to "dev" so `go run` still works without the linker flag.
 var version = "dev"
 
-// newMux builds the router. It is a separate function from main so tests can
-// exercise the real routing table instead of a hand-made approximation.
-func newMux() *http.ServeMux {
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", healthz)
-	return mux
-}
-
-// healthz reports process liveness. Kubernetes will use this as a liveness
-// probe: it answers "is this process still working?", not "are its
-// dependencies up?" — that distinction belongs to a readiness probe, added
-// when there is a database to be ready for.
-func healthz(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(map[string]string{
-		"status":  "ok",
-		"version": version,
-	}); err != nil {
-		log.Printf("healthz: encode: %v", err)
-	}
-}
-
 func main() {
-	addr := os.Getenv("ADDR")
-	if addr == "" {
-		addr = ":8080"
+	addr := envOr("ADDR", ":8080")
+	snapshot := os.Getenv("SNAPSHOT_PATH") // empty disables persistence
+
+	st, err := store.New(snapshot)
+	if err != nil {
+		log.Fatalf("loading catalog: %v", err)
+	}
+	if snapshot != "" {
+		log.Printf("catalog snapshot: %s", snapshot)
+	} else {
+		log.Print("catalog is in-memory only; set SNAPSHOT_PATH to persist")
 	}
 
 	srv := &http.Server{
-		Addr:    addr,
-		Handler: newMux(),
-		// Without this, a client that opens a connection and never sends
-		// headers holds a goroutine open indefinitely.
+		Addr:              addr,
+		Handler:           httpapi.New(st, version).Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
+	// Graceful shutdown: Kubernetes sends SIGTERM and then waits. Exiting
+	// immediately would cut off requests already in flight; ignoring it
+	// entirely means waiting out the grace period before being killed.
+	idle := make(chan struct{})
+	go func() {
+		sig := make(chan os.Signal, 1)
+		signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+		<-sig
+		log.Print("shutting down")
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(ctx); err != nil {
+			log.Printf("shutdown: %v", err)
+		}
+		close(idle)
+	}()
+
 	log.Printf("dataset-api %s listening on %s", version, addr)
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatalf("server: %v", err)
 	}
+	<-idle
+}
+
+func envOr(k, def string) string {
+	if v := os.Getenv(k); v != "" {
+		return v
+	}
+	return def
 }
