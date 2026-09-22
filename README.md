@@ -15,10 +15,6 @@ finished platform. The layout below is the *target*; what exists today:
 | `services/dataset-api` — health endpoint, Go module | in progress |
 | everything else in the tree below | **not built yet** |
 
-Nothing here is claimed to run until its section says so. Where something was
-written but not executed against real infrastructure, it says "validated, not
-deployed".
-
 ---
 
 ## Repository layout
