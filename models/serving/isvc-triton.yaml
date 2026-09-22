@@ -1,0 +1,34 @@
+# The same model served by Triton instead of the sklearn runtime.
+#
+# WHY TRITON: it runs ONNX, TensorRT, PyTorch and TensorFlow in one server,
+# batches concurrent requests dynamically (several small requests become one
+# GPU call — the single biggest throughput win in GPU serving), and can host
+# several models in one process.
+#
+# ARM64 / JETSON NOTE: the standard nvcr.io/nvidia/tritonserver:*-py3 images are
+# amd64. On a Jetson you need the iGPU build, tagged *-py3-igpu. If Triton will
+# not start on your workstation, that mismatch is the first thing to check.
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: alpr-detector
+  namespace: models
+spec:
+  predictor:
+    triton:
+      # Pin the version: Triton's model-repository layout and config.pbtxt
+      # schema do change between releases.
+      image: nvcr.io/nvidia/tritonserver:24.08-py3
+      storageUri: "s3://mlflow/triton-repo"
+      runtimeVersion: 24.08-py3
+      args:
+        - --model-control-mode=explicit
+        - --load-model=alpr_detector
+      resources:
+        requests: { cpu: "1", memory: 2Gi }
+        limits:   { cpu: "2", memory: 4Gi }
+        # Uncomment on a GPU node pool. On the free/burst AKS tier there is no
+        # GPU — run this one locally on the Jetson instead, which is exactly
+        # what the Jetson is for.
+        #   limits:
+        #     nvidia.com/gpu: 1

@@ -1,0 +1,62 @@
+# Triton model configuration.
+#
+# The repository layout Triton expects, and the reason this file sits where it
+# does:
+#
+#   triton-repo/
+#     alpr_detector/
+#       config.pbtxt      <- this file
+#       1/                <- version directory; Triton serves the highest number
+#         model.onnx
+#
+# Versions are directories. Adding a "2/" directory and reloading is how you
+# ship a new model — no image rebuild.
+
+name: "alpr_detector"
+platform: "onnxruntime_onnx"
+
+# max_batch_size > 0 tells Triton the first dimension of every tensor is the
+# batch dimension, which is what unlocks dynamic batching below.
+max_batch_size: 8
+
+input [
+  {
+    name: "images"
+    data_type: TYPE_FP32
+    # 3x640x640, batch dimension implied by max_batch_size.
+    dims: [ 3, 640, 640 ]
+  }
+]
+
+output [
+  {
+    name: "output0"
+    data_type: TYPE_FP32
+    dims: [ 25200, 85 ]
+  }
+]
+
+# DYNAMIC BATCHING — the highest-value block in this file.
+#
+# Triton holds incoming requests for up to max_queue_delay_microseconds, then
+# runs them as one batch. On a GPU this is close to free throughput: a batch of
+# 8 costs barely more than a batch of 1, because the fixed cost of a kernel
+# launch dominates.
+#
+# The trade-off is latency: every request waits up to 100µs longer. That is the
+# knob. Raise the delay for throughput, lower it for latency. Being able to
+# state that trade-off is the point of putting Triton on a CV.
+dynamic_batching {
+  preferred_batch_size: [ 4, 8 ]
+  max_queue_delay_microseconds: 100
+}
+
+instance_group [
+  {
+    count: 1
+    kind: KIND_GPU
+    # kind: KIND_CPU on a machine without a GPU. Triton runs on CPU, just
+    # slower — the dynamic batching win largely disappears there, which is
+    # itself worth knowing.
+  }
+]

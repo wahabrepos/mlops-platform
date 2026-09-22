@@ -1,0 +1,33 @@
+# The CONTENDER: a new model version taking a slice of live traffic.
+#
+# Applying this over the champion does NOT replace it. KServe creates a second
+# revision and splits traffic by percentage. Both revisions serve real requests,
+# from the same URL, at the same time — which is the only way to compare them on
+# the traffic that actually exists rather than on a holdout set.
+#
+# THE PROMOTION DECISION, and why it is not "does it look better":
+#   promote  if  p95 latency <= champion's AND error rate <= champion's
+#                over a window with enough requests to be meaningful
+#   roll back otherwise — which is `kubectl apply` of the champion file, and
+#   takes about 20 seconds because the champion revision never went away.
+#
+# scripts/promote.sh implements exactly that check against Prometheus.
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: alpr-classifier
+  namespace: models
+spec:
+  predictor:
+    # 10%, not 50%. The point of a canary is to bound the blast radius: if the
+    # contender is broken, 10% of users see it for the few minutes it takes the
+    # alert to fire.
+    canaryTrafficPercent: 10
+    model:
+      modelFormat:
+        name: sklearn
+      protocolVersion: v2
+      storageUri: "s3://mlflow/models/alpr-classifier/2"
+      resources:
+        requests: { cpu: 100m, memory: 256Mi }
+        limits:   { cpu: "1",  memory: 1Gi }

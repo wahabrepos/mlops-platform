@@ -1,0 +1,42 @@
+# The CHAMPION: the InferenceService currently taking production traffic.
+#
+# WHAT KSERVE IS DOING FOR YOU HERE
+# An InferenceService is a Custom Resource — a type Kubernetes did not ship
+# with, added by KServe's CRD. The KServe controller watches for these objects
+# and creates, underneath, a Knative Service, which itself creates a Deployment,
+# a Service, and autoscaling config, with an Istio VirtualService in front.
+#
+# Roughly 200 lines of YAML compressed into the 25 below. When asked "what does
+# KServe give you over a plain Deployment?", the answer is: request-aware
+# autoscaling including scale-to-zero, a standard prediction protocol across
+# frameworks, and traffic splitting between revisions without a service mesh
+# config of your own.
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: alpr-classifier
+  namespace: models
+  annotations:
+    # Scale to zero when idle. On a burst cluster billed by the hour this is
+    # not a nicety: an idle model that holds a pod holds a node.
+    autoscaling.knative.dev/min-scale: "0"
+    autoscaling.knative.dev/max-scale: "3"
+    # Target 10 concurrent requests per pod before adding another. Knative's
+    # default autoscaler is concurrency-based, not CPU-based — which suits
+    # inference, where a request is expensive and CPU is a poor proxy for load.
+    autoscaling.knative.dev/target: "10"
+spec:
+  predictor:
+    # canaryTrafficPercent lives on the contender, not here. The champion
+    # implicitly receives the remainder.
+    model:
+      modelFormat:
+        name: sklearn
+      # v2 is the KServe/Open Inference Protocol, the same wire format Triton
+      # speaks. Choosing it now means swapping sklearn for Triton later is a
+      # change of runtime, not a change of client code.
+      protocolVersion: v2
+      storageUri: "s3://mlflow/models/alpr-classifier/1"
+      resources:
+        requests: { cpu: 100m, memory: 256Mi }
+        limits:   { cpu: "1",  memory: 1Gi }
