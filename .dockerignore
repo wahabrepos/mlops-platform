@@ -1,0 +1,15 @@
+# The build context is the repo root (the Go module spans services/), so keep
+# everything the image does not need out of it: a fat context is slow to send
+# to the daemon and busts the layer cache on unrelated edits.
+.git
+bin/
+docs/
+CLAUDE.md
+platform/local/volumes/
+platform/terraform/
+observability/
+gitops/
+models/
+policy/
+**/__pycache__/
+*.md

@@ -168,6 +168,24 @@ services:
   # What you lose: parallel workers, and the Celery/Kubernetes executor story.
   # You should know that and say it — see docs/demo-scripts/p1-demo.md.
   # --------------------------------------------------------------------------
+  dataset-api:
+    # Built from source in this repo rather than pulled: this is the service
+    # the whole pipeline exists to talk to.
+    build:
+      context: ../..
+      dockerfile: services/dataset-api/Dockerfile
+      args:
+        VERSION: ${GIT_SHA:-dev}
+    environment:
+      ADDR: ":8080"
+      SNAPSHOT_PATH: /data/catalog.json
+    volumes:
+      - dataset-api-data:/data
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+    profiles: [core, airflow, obs, lineage]
+
   airflow:
     image: apache/airflow:2.10.5-python3.11
     profiles: [airflow]
@@ -191,7 +209,7 @@ services:
       MLFLOW_S3_ENDPOINT_URL: http://minio:9000
       AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minioadmin}
       AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
-      DATASET_API_URL: http://host.docker.internal:8080
+      DATASET_API_URL: ${DATASET_API_URL:-http://dataset-api:8080}
       _PIP_ADDITIONAL_REQUIREMENTS: >-
         great-expectations==0.18.19
         minio==7.2.15
@@ -278,3 +296,4 @@ services:
 
 volumes:
   airflow-logs:
+  dataset-api-data:
