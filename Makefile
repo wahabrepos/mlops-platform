@@ -23,7 +23,8 @@ REGISTRY ?= localhost:5001
         run test test-race lint fmt build docker-build \
         kind-up kind-down k8s-deploy \
         tf-init tf-plan tf-apply tf-backup azure-up azure-down azure-cost azure-status \
-        policy-test ci clean
+        policy-test ci clean \
+        vm-up vm-ssh vm-down vm-status
 
 ## ---------------------------------------------------------------- help ----
 
@@ -181,6 +182,71 @@ azure-cost: ## Month-to-date spend by service
 	  --query "[].{service:meterCategory,cost:pretaxCost}" -o tsv 2>/dev/null \
 	  | awk -F'\t' '{s[$$1]+=$$2} END {for (k in s) printf "%-34s %8.2f\n", k, s[k]}' | sort -k2 -rn \
 	  || echo "  consumption API is not available on all subscription types; use the portal's Cost Analysis blade"
+
+## ----------------------------------------------------------- azure devbox ----
+#
+# The heavy local stack (Postgres + MinIO + MLflow + Airflow) runs on an Azure
+# VM rather than on this workstation, which has ~2.6 GiB free. These targets are
+# the whole lifecycle of that box.
+#
+# Deallocate, never stop. `az vm stop` powers the guest off but keeps the
+# hardware reserved and you keep paying full compute for it. Only `deallocate`
+# stops the meter. That distinction is encoded in vm-down so it does not have to
+# be remembered.
+
+VM_RG   ?= mlops-vm-rg
+VM_NAME ?= mlops-vm
+VM_USER ?= azureuser
+VM_KEY  ?= $(HOME)/.ssh/id_ed25519
+
+# Looked up rather than hard-coded, so recreating the VM does not strand these
+# targets on a stale address. Recursive (=), so the lookup runs only when used.
+VM_IP    = $(shell az network public-ip list -g $(VM_RG) --query "[0].ipAddress" -o tsv 2>/dev/null)
+
+vm-up: ## Start the Azure dev VM. RESUMES BILLING (~$0.23/hour).
+	@az vm start -g $(VM_RG) -n $(VM_NAME) -o none
+	@ip="$(VM_IP)"; echo "  waiting for ssh on $$ip"; \
+	 for i in $$(seq 1 30); do \
+	   ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=5 -o BatchMode=yes \
+	       -i $(VM_KEY) $(VM_USER)@$$ip true 2>/dev/null && break; \
+	   sleep 5; \
+	 done; \
+	 echo ""; \
+	 echo "  VM up at $$ip. Billing has resumed."; \
+	 echo ""; \
+	 echo "  The stack does NOT come back by itself - only dataset-api has a"; \
+	 echo "  restart policy. To bring the rest up, on the VM:"; \
+	 echo ""; \
+	 echo "      make vm-ssh"; \
+	 echo "      cd ~/mlops-platform && make local-up PROFILE=airflow"; \
+	 echo ""
+
+vm-ssh: ## Open a shell on the Azure dev VM
+	@test -n "$(VM_IP)" || { echo "no public ip in $(VM_RG) - is the VM created?"; exit 1; }
+	ssh -o StrictHostKeyChecking=accept-new -i $(VM_KEY) $(VM_USER)@$(VM_IP)
+
+vm-down: ## Deallocate the dev VM. STOPS COMPUTE BILLING. Run this every time.
+	@echo "  deallocating (not stopping - stop would keep billing)"
+	@az vm deallocate -g $(VM_RG) -n $(VM_NAME) -o none
+	@$(MAKE) --no-print-directory vm-status
+
+vm-status: ## Is the dev VM running, and what is it costing?
+	@state=$$(az vm get-instance-view -g $(VM_RG) -n $(VM_NAME) \
+	    --query "instanceView.statuses[?starts_with(code,'PowerState')].displayStatus" \
+	    -o tsv 2>/dev/null); \
+	 if [ -z "$$state" ]; then \
+	   echo "  no VM '$(VM_NAME)' in '$(VM_RG)' - nothing is billing"; \
+	   exit 0; \
+	 fi; \
+	 echo "  state:  $$state"; \
+	 echo "  ip:     $(VM_IP)"; \
+	 case "$$state" in \
+	   "VM running")     echo "  cost:   ~\$$0.23/hour NOW. make vm-down when you finish.";; \
+	   "VM deallocated") echo "  cost:   compute stopped; ~\$$5/month for the disk and ip.";; \
+	   "VM stopped")     echo "  WARNING: stopped is not deallocated - you are STILL paying"; \
+	                     echo "           full compute. Run: make vm-down";; \
+	   *)                echo "  cost:   unknown for this state";; \
+	 esac
 
 ## ---------------------------------------------------------------- misc ----
 
